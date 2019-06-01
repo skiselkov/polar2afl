@@ -1,15 +1,15 @@
-ACFUTILS=../libacfutils
+OBJS = polar2afl.o avl.o
 
-CFLAGS=-g -O0 -I$(ACFUTILS)/src \
-	$(shell $(ACFUTILS)/pkg-config-deps linux-64 --cflags)
-
-LIBS=-L$(ACFUTILS)/qmake/lin64 -lacfutils \
-	$(shell $(ACFUTILS)/pkg-config-deps linux-64 --libs) -lm
+CFLAGS=-W -Wall -Werror -g -O2
+LIBS=-lm
 
 all : polar2afl
 
 clean :
-	rm -f polar2afl
+	rm -f polar2afl $(OBJS)
 
-polar2afl : polar2afl.c
-	$(CC) -W -Wall -Werror $(CFLAGS) -o $@ $^ $(LIBS)
+polar2afl : $(OBJS)
+	$(CC) -W -Wall -Werror -o $@ $^ $(LIBS)
+
+%.o : %.c
+	$(CC) $(CFLAGS) -c -o $@ $^

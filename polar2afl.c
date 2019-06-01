@@ -1,13 +1,38 @@
-#include <stdio.h>
-#include <stddef.h>
-#include <stdbool.h>
-#include <string.h>
-#include <errno.h>
+/*
+ * CDDL HEADER START
+ *
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
+ *
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * http://www.illumos.org/license/CDDL.
+ *
+ * CDDL HEADER END
+ */
+/*
+ * Copyright 2019 Saso Kiselkov. All rights reserved.
+ */
 
-#include <acfutils/avl.h>
-#include <acfutils/helpers.h>
-#include <acfutils/math.h>
-#include <acfutils/safe_alloc.h>
+#include <ctype.h>
+#include <errno.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "avl.h"
+#include "safe_alloc.h"
+
+#ifndef	MIN
+#define	MIN(x, y)	((x) < (y) ? (x) : (y))
+#endif
+#ifndef	MAX
+#define	MAX(x, y)	((x) > (y) ? (x) : (y))
+#endif
 
 typedef struct {
 	double		alpha;
@@ -32,6 +57,61 @@ typedef struct {
 static double	blend_range = 10;	/* degrees */
 
 static void afl_free(afl_t *afl);
+
+static double
+wavg(double x, double y, double w)
+{
+	assert(w >= 0.0 && w <= 1.0);
+	return (x + (y - x) * w);
+}
+
+static inline double
+clamp(double x, double min_val, double max_val)
+{
+	if (min_val < max_val) {
+		if (x < min_val)
+			return (min_val);
+		if (x > max_val)
+			return (max_val);
+	} else {
+		if (x > min_val)
+			return (min_val);
+		if (x < max_val)
+			return (max_val);
+	}
+	return (x);
+}
+
+static inline double
+iter_fract(double x, double min_val, double max_val, bool clamp_output)
+{
+	x = (x - min_val) / (max_val - min_val);
+	if (clamp_output)
+		x = clamp(x, 0, 1);
+	return (x);
+}
+
+/*
+ * Removes all leading & trailing whitespace from a line.
+ */
+void
+strip_space(char *line)
+{
+	char	*p;
+	size_t	len = strlen(line);
+
+	/* strip leading whitespace */
+	for (p = line; *p != 0 && isspace(*p); p++)
+		;
+	if (p != line) {
+		memmove(line, p, (len + 1) - (p - line));
+		len -= (p - line);
+	}
+
+	for (p = line + len - 1; p >= line && isspace(*p); p--)
+		;
+	p[1] = 0;
+}
 
 static int
 polar_diag_compar(const void *a, const void *b)
@@ -92,15 +172,18 @@ afl_parse_polar_diag(FILE *fp, const char *filename, int *line_nr)
 	if (n <= 0)
 		goto errout;
 	if (sscanf(line, "%lf", &diag->Re) != 1) {
-		logMsg("%s:%d: error parsing Reynolds number", filename,
-		    *line_nr);
+		fprintf(stderr, "%s:%d: error parsing Reynolds number\n",
+		    filename, *line_nr);
 		goto errout;
 	}
 	diag->Re *= 1000000.0;
 	(*line_nr)++;
 	diag->afl_data = safe_strdup(line);
 	/* skip the "alpha cl cd cm:" line */
-	getline(&line, &linecap, fp);
+	if (getline(&line, &linecap, fp) <= 0) {
+		fprintf(stderr, "%s:%d: premature EOF\n", filename, *line_nr);
+		goto errout;
+	}
 	(*line_nr)++;
 
 	for (;getline(&line, &linecap, fp) > 0; (*line_nr)++) {
@@ -110,8 +193,8 @@ afl_parse_polar_diag(FILE *fp, const char *filename, int *line_nr)
 
 		if (sscanf(line, "%lf %lf %lf %lf", &alpha, &Cl, &Cd, &Cm) !=
 		    4) {
-			logMsg("%s:%d: error parsing polar line", filename,
-			    *line_nr);
+			fprintf(stderr, "%s:%d: error parsing polar line\n",
+			    filename, *line_nr);
 			goto errout;
 		}
 		polar = safe_calloc(1, sizeof (*polar));
@@ -120,8 +203,8 @@ afl_parse_polar_diag(FILE *fp, const char *filename, int *line_nr)
 		polar->Cd = Cd;
 		polar->Cm = Cm;
 		if (avl_find(&diag->polars, polar, &where) != NULL) {
-			logMsg("%s:%d: duplicate alpha detected", filename,
-			    *line_nr);
+			fprintf(stderr, "%s:%d: duplicate alpha detected\n",
+			    filename, *line_nr);
 			goto errout;
 		}
 		avl_insert(&diag->polars, polar, where);
@@ -160,7 +243,8 @@ afl_parse(const char *filename)
 
 	fp = fopen(filename, "r");
 	if (fp == NULL) {
-		logMsg("Can't open %s: %s", filename, strerror(errno));
+		fprintf(stderr, "Can't open %s: %s\n", filename,
+		    strerror(errno));
 		return (NULL);
 	}
 
@@ -185,8 +269,8 @@ afl_parse(const char *filename)
 		avl_index_t where;
 
 		if (avl_find(&afl->diags, diag, &where) != NULL) {
-			logMsg("%s: duplicate polar diagram for Re = %f",
-			    filename, diag->Re);
+			fprintf(stderr, "%s: duplicate polar diagram for "
+			    "Re = %f\n", filename, diag->Re);
 			polar_diag_free(diag);
 			goto errout;
 		}
@@ -229,7 +313,7 @@ afl_write_diag(FILE *fp, const polar_diag_t *diag)
 			p1 = avl_nearest(&diag->polars, where, AVL_BEFORE);
 			p2 = avl_nearest(&diag->polars, where, AVL_AFTER);
 
-			ASSERT(p1 != NULL || p2 != NULL);
+			assert(p1 != NULL || p2 != NULL);
 			if (p1 != NULL && p2 != NULL) {
 				double w = iter_fract(alpha, p1->alpha,
 				    p2->alpha, true);
@@ -260,7 +344,8 @@ afl_write(const afl_t *afl, const char *filename)
 	FILE *fp = fopen(filename, "w");
 
 	if (fp == NULL) {
-		logMsg("Can't write airfoil %s: %s", filename, strerror(errno));
+		fprintf(stderr, "Can't write airfoil %s: %s\n", filename,
+		    strerror(errno));
 		return (false);
 	}
 
@@ -303,7 +388,8 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 
 	fp = fopen(filename, "r");
 	if (fp == NULL) {
-		logMsg("Error opening %s: %s", filename, strerror(errno));
+		fprintf(stderr, "Error opening %s: %s\n", filename,
+		    strerror(errno));
 		return (false);
 	}
 	diag = polar_diag_alloc();
@@ -319,8 +405,8 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 			if ((p = strstr(line, "Re =")) != NULL) {
 				if (sscanf(&p[4], "%lf e %lf", &mantissa,
 				    &exponent) != 2) {
-					logMsg("%s: error parsing Re",
-					    filename);
+					fprintf(stderr, "%s: error parsing "
+					    "Re\n", filename);
 					goto errout;
 				}
 				diag->Re = mantissa * pow(10, exponent);
@@ -335,7 +421,8 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 			if (sscanf(line, "%lf %lf %lf %lf %lf",
 			    &polar->alpha, &polar->Cl, &polar->Cd, &CDp,
 			    &polar->Cm) != 5) {
-				logMsg("%s: error parsing polar", filename);
+				fprintf(stderr, "%s: error parsing polar\n",
+				    filename);
 				goto errout;
 			}
 			if (avl_find(&diag->polars, polar, &where) != NULL) {
@@ -346,8 +433,8 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 		}
 	}
 	if (avl_find(&xfoil->diags, diag, &where) != NULL) {
-		logMsg("%s: is a duplicate of an existing polar at Re = %fM",
-		    filename, diag->Re / 1000000);
+		fprintf(stderr, "%s: is a duplicate of an existing polar "
+		    "at Re = %fM\n", filename, diag->Re / 1000000);
 		goto errout;
 	}
 	avl_insert(&xfoil->diags, diag, where);
@@ -373,7 +460,7 @@ find_nearest_polar(const polar_diag_t *diag, double alpha)
 		polar = avl_nearest(&diag->polars, where, AVL_BEFORE);
 	if (polar == NULL)
 		polar = avl_nearest(&diag->polars, where, AVL_AFTER);
-	ASSERT(polar != NULL);
+	assert(polar != NULL);
 	return (polar);
 }
 
@@ -386,7 +473,7 @@ blend_polar(const polar_diag_t *diag, polar_t *tgt_polar,
 	double interp_w, blend_w, Cl, Cd, Cm;
 	double alpha_min, alpha_max;
 
-	ASSERT(src_polar2 != NULL);
+	assert(src_polar2 != NULL);
 
 	alpha_min = MIN(src_polar1->alpha, src_polar1->alpha + d_alpha);
 	alpha_max = MAX(src_polar1->alpha, src_polar1->alpha + d_alpha);
@@ -416,10 +503,10 @@ afl_interp_diag_polar(const polar_diag_t *d1, const polar_diag_t *d2,
 	p1 = avl_nearest(&d2->polars, where, AVL_BEFORE);
 	p2 = avl_nearest(&d2->polars, where, AVL_AFTER);
 	if (p1 == NULL) {
-		ASSERT(p2 != NULL);
+		assert(p2 != NULL);
 		blend_polar(d1, p, p2, -blend_range);
 	} else if (p2 == NULL) {
-		ASSERT(p1 != NULL);
+		assert(p1 != NULL);
 		blend_polar(d1, p, p1, blend_range);
 	} else {
 		w = iter_fract(p->alpha, p1->alpha, p2->alpha, true);
@@ -457,16 +544,10 @@ afl_combine(afl_t *afl, const afl_t *xfoil)
 
 		if (d2 == NULL)
 			continue;
-		ASSERT(avl_numnodes(&d2->polars) != 0);
+		assert(avl_numnodes(&d2->polars) != 0);
 
 		afl_combine_diag(d1, d2);
 	}
-}
-
-static void
-log_dbg_string(const char *str)
-{
-	fputs(str, stderr);
 }
 
 int
@@ -474,8 +555,6 @@ main(int argc, const char *argv[])
 {
 	afl_t *afl;
 	afl_t *xfoil;
-
-	log_init(log_dbg_string, "polar2afl");
 
 	if (argc < 3) {
 		fprintf(stderr, "Usage: %s <input.afl> <output.afl> "
