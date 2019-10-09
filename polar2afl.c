@@ -438,8 +438,7 @@ afl_write(const afl_t *afl, const char *filename)
 		return (false);
 	}
 
-	if (afl->preamble != NULL)
-		fprintf(fp, "%s", afl->preamble);
+	fprintf(fp, "%s", afl->preamble);
 	fprintf(fp, "%d\n", (int)avl_numnodes(&afl->diags));
 
 	for (const polar_diag_t *diag = avl_first(&afl->diags);
