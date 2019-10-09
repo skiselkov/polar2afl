@@ -16,8 +16,10 @@
  * Copyright 2019 Saso Kiselkov. All rights reserved.
  */
 
+#include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <getopt.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -43,8 +45,33 @@ typedef struct {
 } polar_t;
 
 typedef struct {
-	double		Re;
-	char		*afl_data;
+	struct {
+		double	Re;
+		double	slope;
+		double	intercept;
+		double	alpha_min;
+		double	alpha_max;
+		double	lin_range;
+		double	lift_power;
+		double	Cl_max;
+		double	stall_drop;
+		double	stall_power;
+		double	stalled_drop;
+		double	Cd_min;
+		double	min_Cd_Cl;
+		double	Cd_alpha10;
+		double	Cd_power;
+		double	buck_Cl;
+		double	buck_width;
+		double	buck_depth;
+		double	buck_power;
+		double	Cm_alpha1;
+		double	Cm_alpha2;
+		double	Cm_val_alpha_neg20;
+		double	Cm_val_alpha1;
+		double	Cm_val_alpha2;
+		double	Cm_val_alpha_pos20;
+	} params;
 	avl_tree_t	polars;
 	avl_node_t	node;
 } polar_diag_t;
@@ -54,9 +81,45 @@ typedef struct {
 	avl_tree_t	diags;
 } afl_t;
 
-static double	blend_range = 10;	/* degrees */
+static bool	do_smooth_polars = true;
+static double	edge_blend_range = 10;	/* degrees */
 
 static void afl_free(afl_t *afl);
+static polar_diag_t *smooth_diag(polar_diag_t *d);
+
+ssize_t
+my_getline(char **line_p, size_t *cap_p, FILE *fp)
+{
+	char *line;
+	size_t cap, n = 0;
+
+	assert(line_p != NULL);
+	line = *line_p;
+	assert(cap_p != NULL);
+	cap = *cap_p;
+	assert(fp != NULL);
+
+	do {
+		if (n + 1 >= cap) {
+			cap += 256;
+			line = realloc(line, cap);
+		}
+		assert(n < cap);
+		if (fgets(&line[n], cap - n, fp) == NULL) {
+			if (n != 0)
+				break;
+			*line_p = line;
+			*cap_p = cap;
+			return (-1);
+		}
+		n = strlen(line);
+	} while (n > 0 && line[n - 1] != '\n');
+
+	*line_p = line;
+	*cap_p = cap;
+
+	return (n);
+}
 
 static double
 wavg(double x, double y, double w)
@@ -118,9 +181,9 @@ polar_diag_compar(const void *a, const void *b)
 {
 	const polar_diag_t *pa = a, *pb = b;
 
-	if (pa->Re < pb->Re)
+	if (pa->params.Re < pb->params.Re)
 		return (-1);
-	if (pa->Re > pb->Re)
+	if (pa->params.Re > pb->params.Re)
 		return (1);
 	return (0);
 }
@@ -143,7 +206,6 @@ polar_diag_free(polar_diag_t *diag)
 	void *cookie = NULL;
 	polar_t *polar;
 
-	free(diag->afl_data);
 	while ((polar = avl_destroy_nodes(&diag->polars, &cookie)) != NULL)
 		free(polar);
 	avl_destroy(&diag->polars);
@@ -167,26 +229,39 @@ afl_parse_polar_diag(FILE *fp, const char *filename, int *line_nr)
 	int n;
 	polar_diag_t *diag = polar_diag_alloc();
 
-	n = getline(&line, &linecap, fp);
+	n = my_getline(&line, &linecap, fp);
 	/* Probably an EOF, just exit */
 	if (n <= 0)
 		goto errout;
-	if (sscanf(line, "%lf", &diag->Re) != 1) {
-		fprintf(stderr, "%s:%d: error parsing Reynolds number\n",
+	if (sscanf(line, "%lf %lf %lf %lf %lf %lf %lf %lf %lf %lf "
+	    "%lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf",
+	    &diag->params.Re, &diag->params.slope, &diag->params.intercept,
+	    &diag->params.alpha_min, &diag->params.alpha_max,
+	    &diag->params.lin_range, &diag->params.lift_power,
+	    &diag->params.Cl_max, &diag->params.stall_drop,
+	    &diag->params.stall_power, &diag->params.stalled_drop,
+	    &diag->params.Cd_min, &diag->params.min_Cd_Cl,
+	    &diag->params.Cd_alpha10, &diag->params.Cd_power,
+	    &diag->params.buck_Cl, &diag->params.buck_width,
+	    &diag->params.buck_depth, &diag->params.buck_power,
+	    &diag->params.Cm_alpha1, &diag->params.Cm_alpha2,
+	    &diag->params.Cm_val_alpha_neg20,
+	    &diag->params.Cm_val_alpha1, &diag->params.Cm_val_alpha2,
+	    &diag->params.Cm_val_alpha_pos20) != 25) {
+		fprintf(stderr, "%s:%d: error parsing polar parameters\n",
 		    filename, *line_nr);
 		goto errout;
 	}
-	diag->Re *= 1000000.0;
+	diag->params.Re *= 1000000.0;
 	(*line_nr)++;
-	diag->afl_data = safe_strdup(line);
 	/* skip the "alpha cl cd cm:" line */
-	if (getline(&line, &linecap, fp) <= 0) {
+	if (my_getline(&line, &linecap, fp) <= 0) {
 		fprintf(stderr, "%s:%d: premature EOF\n", filename, *line_nr);
 		goto errout;
 	}
 	(*line_nr)++;
 
-	for (;getline(&line, &linecap, fp) > 0; (*line_nr)++) {
+	for (; my_getline(&line, &linecap, fp) > 0; (*line_nr)++) {
 		double alpha, Cl, Cd, Cm;
 		polar_t *polar;
 		avl_index_t where;
@@ -250,7 +325,7 @@ afl_parse(const char *filename)
 
 	afl = afl_alloc();
 
-	for (line_nr = 0; getline(&line, &linecap, fp) > 0; line_nr++) {
+	for (line_nr = 0; my_getline(&line, &linecap, fp) > 0; line_nr++) {
 		if (line_nr < 19) {
 			strncat(afl->preamble, line,
 			    sizeof (afl->preamble) - 1);
@@ -270,7 +345,7 @@ afl_parse(const char *filename)
 
 		if (avl_find(&afl->diags, diag, &where) != NULL) {
 			fprintf(stderr, "%s: duplicate polar diagram for "
-			    "Re = %f\n", filename, diag->Re);
+			    "Re = %f\n", filename, diag->params.Re);
 			polar_diag_free(diag);
 			goto errout;
 		}
@@ -293,8 +368,22 @@ afl_write_diag(FILE *fp, const polar_diag_t *diag)
 	if (avl_numnodes(&diag->polars) == 0)
 		return;
 
-	if (diag->afl_data != NULL)
-		fputs(diag->afl_data, fp);
+	fprintf(fp, "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f "
+	    "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f "
+	    "%.5f %.5f %.5f\n",
+	    diag->params.Re / 1000000, diag->params.slope,
+	    diag->params.intercept, diag->params.alpha_min,
+	    diag->params.alpha_max, diag->params.lin_range,
+	    diag->params.lift_power, diag->params.Cl_max,
+	    diag->params.stall_drop, diag->params.stall_power,
+	    diag->params.stalled_drop, diag->params.Cd_min,
+	    diag->params.min_Cd_Cl, diag->params.Cd_alpha10,
+	    diag->params.Cd_power, diag->params.buck_Cl,
+	    diag->params.buck_width, diag->params.buck_depth,
+	    diag->params.buck_power, diag->params.Cm_alpha1,
+	    diag->params.Cm_alpha2, diag->params.Cm_val_alpha_neg20,
+	    diag->params.Cm_val_alpha1, diag->params.Cm_val_alpha2,
+	    diag->params.Cm_val_alpha_pos20);
 	fprintf(fp, "alpha cl cd cm:\n");
 
 	for (double alpha = -180; alpha <= 180;) {
@@ -394,7 +483,7 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 	}
 	diag = polar_diag_alloc();
 
-	while (getline(&line, &linecap, fp) > 0) {
+	while (my_getline(&line, &linecap, fp) > 0) {
 		strip_space(line);
 		if (strlen(line) == 0)
 			continue;
@@ -409,7 +498,7 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 					    "Re\n", filename);
 					goto errout;
 				}
-				diag->Re = mantissa * pow(10, exponent);
+				diag->params.Re = mantissa * pow(10, exponent);
 			} else if ((p = strstr(line, "-------")) != NULL) {
 				header = false;
 			}
@@ -432,9 +521,11 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 			avl_insert(&diag->polars, polar, where);
 		}
 	}
+	if (do_smooth_polars)
+		diag = smooth_diag(diag);
 	if (avl_find(&xfoil->diags, diag, &where) != NULL) {
 		fprintf(stderr, "%s: is a duplicate of an existing polar "
-		    "at Re = %fM\n", filename, diag->Re / 1000000);
+		    "at Re = %fM\n", filename, diag->params.Re / 1000000);
 		goto errout;
 	}
 	avl_insert(&xfoil->diags, diag, where);
@@ -504,10 +595,10 @@ afl_interp_diag_polar(const polar_diag_t *d1, const polar_diag_t *d2,
 	p2 = avl_nearest(&d2->polars, where, AVL_AFTER);
 	if (p1 == NULL) {
 		assert(p2 != NULL);
-		blend_polar(d1, p, p2, -blend_range);
+		blend_polar(d1, p, p2, -edge_blend_range);
 	} else if (p2 == NULL) {
 		assert(p1 != NULL);
-		blend_polar(d1, p, p1, blend_range);
+		blend_polar(d1, p, p1, edge_blend_range);
 	} else {
 		w = iter_fract(p->alpha, p1->alpha, p2->alpha, true);
 		p->Cl = wavg(p1->Cl, p2->Cl, w);
@@ -516,9 +607,63 @@ afl_interp_diag_polar(const polar_diag_t *d1, const polar_diag_t *d2,
 	}
 }
 
-static void
-afl_combine_diag(const polar_diag_t *d1, const polar_diag_t *d2)
+/*
+ * Uses a Gaussian interpolator to smooth out a polar diagram. The passed
+ * diagram is then freed and the smoothed-out version is returned. The
+ * should substitute the original diagram with the newly smoothed-out one.
+ */
+static polar_diag_t *
+smooth_diag(polar_diag_t *d1)
 {
+	polar_diag_t *d2;
+	const double kernel[] = { 0.06136, 0.24477, 0.38774, 0.24477, 0.06136 };
+
+	d2 = polar_diag_alloc();
+	memcpy(&d2->params, &d1->params, sizeof (d1->params));
+
+	for (polar_t *p = avl_first(&d1->polars); p != NULL;
+	    p = AVL_NEXT(&d1->polars, p)) {
+		polar_t *p_l, *p_ll, *p_r, *p_rr;
+		polar_t *np = safe_calloc(1, sizeof (*np));
+
+		memcpy(np, p, sizeof (*np));
+		avl_add(&d2->polars, np);
+
+		p_l = AVL_PREV(&d1->polars, p);
+		p_r = AVL_NEXT(&d1->polars, p);
+		if (p_l == NULL || p_r == NULL)
+			continue;
+		p_ll = AVL_PREV(&d1->polars, p_l);
+		p_rr = AVL_NEXT(&d1->polars, p_r);
+		if (p_ll == NULL || p_rr == NULL)
+			continue;
+
+		np->Cl = (p_ll->Cl * kernel[0] + p_l->Cl * kernel[1] +
+		    p->Cl * kernel[2] + p_r->Cl * kernel[3] +
+		    p_rr->Cl * kernel[4]);
+		np->Cd = (p_ll->Cd * kernel[0] + p_l->Cd * kernel[1] +
+		    p->Cd * kernel[2] + p_r->Cd * kernel[3] +
+		    p_rr->Cd * kernel[4]);
+		np->Cm = (p_ll->Cm * kernel[0] + p_l->Cm * kernel[1] +
+		    p->Cm * kernel[2] + p_r->Cm * kernel[3] +
+		    p_rr->Cm * kernel[4]);
+	}
+
+	polar_diag_free(d1);
+
+	return (d2);
+}
+
+static void
+afl_combine_diag(polar_diag_t *d1, const polar_diag_t *d2)
+{
+	double Cl_max = -INFINITY;
+	double Cl_max_alpha = NAN;
+	double Cl_min = INFINITY;
+	double Cl_min_alpha = NAN;
+	double Cd_min = INFINITY;
+	double Cd_min_Cl = NAN;
+
 	for (polar_t *p = avl_first(&d1->polars); p != NULL;
 	    p = AVL_NEXT(&d1->polars, p)) {
 		const polar_t *p2;
@@ -532,7 +677,33 @@ afl_combine_diag(const polar_diag_t *d1, const polar_diag_t *d2)
 		} else {
 			afl_interp_diag_polar(d1, d2, p, where);
 		}
+
+		if (p->Cl > Cl_max) {
+			Cl_max = p->Cl;
+			Cl_max_alpha = p->alpha;
+		}
+		if (p->Cl < Cl_min) {
+			Cl_min = p->Cl;
+			Cl_min_alpha = p->alpha;
+		}
+		if (p->Cd < Cd_min) {
+			Cd_min = p->Cd;
+			Cd_min_Cl = p->Cl;
+		}
 	}
+
+	assert(isfinite(Cl_max));
+	assert(!isnan(Cl_max_alpha));
+	assert(isfinite(Cl_min));
+	assert(!isnan(Cl_min_alpha));
+	assert(isfinite(Cd_min));
+	assert(!isnan(Cd_min_Cl));
+
+	d1->params.Cl_max = Cl_max;
+	d1->params.alpha_max = clamp(Cl_max_alpha, -19.999, 19.999);
+	d1->params.alpha_min = clamp(Cl_min_alpha, -19.999, 19.999);
+	d1->params.Cd_min = Cd_min;
+	d1->params.min_Cd_Cl = Cd_min_Cl;
 }
 
 static void
@@ -550,15 +721,92 @@ afl_combine(afl_t *afl, const afl_t *xfoil)
 	}
 }
 
+static void
+print_usage(FILE *fp, const char *progname)
+{
+	fprintf(fp, "Usage: %s [-hs] [-e <range>] <input.afl> <output.afl> "
+	    "[polar.txt...]\n"
+	    "\n"
+	    "  Copyright 2019 Saso Kiselkov. All rights reserved.\n"
+	    "\n"
+	    "  This utility takes an input .afl file produced by X-Plane's\n"
+	    "  Airfoil Maker and a number of polar graphs from XFoil and\n"
+	    "  splices the XFoil data into the .afl file, generating a new\n"
+	    "  output .afl file in the process. If you are using  XFLR5 to\n"
+	    "  generate the polars, you can batch export all polars by\n"
+	    "  selecting Polars -> Export all -> to text format.\n"
+	    "  Please note: before attempt to splice the XFoil polars an .afl\n"
+	    "  file, make sure that the file already contains all the Re\n"
+	    "  numbers you want to insert. For example, if you've generated\n"
+	    "  XFoil polars for Re=3.5M, 4.5M and 5.5M, make sure the\n"
+	    "  corresponding Re tabs are already present in the .afl file.\n"
+	    "  Then save the file in Airfoil Maker and use polar2afl.\n"
+	    "  polar2afl will NOT splice in any polars for Re numbers that\n"
+	    "  are not already present in the .afl file.\n"
+	    "\n"
+	    "Example:\n"
+	    "  Take two polars named `NACA2412_Re2.5.txt' and "
+	    "`NACA2412_Re3.5.txt'\n"
+	    "  in the current directory and splice them into an airfoil file\n"
+	    "  named `foo.afl', writing the result to a new file named "
+	    "`bar.afl'.\n"
+	    "\n"
+	    "  $ %s foo.afl bar.afl NACA2412_Re2.5.txt NACA2412_Re3.5.txt\n"
+	    "\n"
+	    "Options:\n"
+	    " -h: Shows this help screen and exits.\n"
+	    " -s: DON'T smooth polar diagrams. The polars produced by XFoil\n"
+	    "     sometimes contain jagged jumps, especially when the solver\n"
+	    "     couldn't converge on some points. To avoid such weirdness\n"
+	    "     propagating into the .afl file, we do a guassian smoothing\n"
+	    "     pass to get rid of such artifacts. Passing the '-s' option\n"
+	    "     DISABLES this smoothing pass.\n"
+	    " -e <range>: selects the alpha range over which we interpolate\n"
+	    "     between the XFoil polars and the original input .afl file.\n"
+	    "     The edges of the XFoil polars generally don't smoothly\n"
+	    "     attach to the original .afl file, so over a range of alphas\n"
+	    "     outside of the polar data range, we gradually interpolate\n"
+	    "     between the original .afl curve and our polar data curve.\n"
+	    "     The default is to interpolate the edge fit over 10 degrees\n"
+	    "     of alpha range.\n",
+	    progname, progname);
+}
+
 int
-main(int argc, const char *argv[])
+main(int argc, char *argv[])
 {
 	afl_t *afl;
 	afl_t *xfoil;
+	int opt;
+
+	while ((opt = getopt(argc, argv, "hse:")) != -1) {
+		switch (opt) {
+		case 'h':
+			print_usage(stdout, argv[0]);
+			return (0);
+		case 's':
+			do_smooth_polars = false;
+			break;
+		case 'e':
+			edge_blend_range = atof(optarg);
+			if (edge_blend_range < 0.1) {
+				fprintf(stderr, "Invalid edge blend range, "
+				    "must be greater than or equal to 0.1\n");
+				return (1);
+			}
+			break;
+		default:
+			print_usage(stderr, argv[1]);
+			return (1);
+		}
+	}
+
+	argc -= optind - 1;
+	argv += optind - 1;
 
 	if (argc < 3) {
-		fprintf(stderr, "Usage: %s <input.afl> <output.afl> "
-		    "[polar.txt...]\n", argv[0]);
+		fprintf(stderr, "Missing arguments. Try \"%s -h\" for help.\n",
+		    argv[0]);
 		return (1);
 	}
 
