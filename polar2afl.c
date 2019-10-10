@@ -705,19 +705,46 @@ afl_combine_diag(polar_diag_t *d1, const polar_diag_t *d2)
 	d1->params.min_Cd_Cl = Cd_min_Cl;
 }
 
-static void
+static bool
 afl_combine(afl_t *afl, const afl_t *xfoil)
 {
-	for (polar_diag_t *d1 = avl_first(&afl->diags); d1 != NULL;
-	    d1 = AVL_NEXT(&afl->diags, d1)) {
-		const polar_diag_t *d2 = avl_find(&xfoil->diags, d1, NULL);
+	bool result = true;
 
-		if (d2 == NULL)
-			continue;
-		assert(avl_numnodes(&d2->polars) != 0);
+	for (polar_diag_t *d_xfoil = avl_first(&xfoil->diags); d_xfoil != NULL;
+	    d_xfoil = AVL_NEXT(&afl->diags, d_xfoil)) {
+		const polar_diag_t *d_afl =
+		    avl_find(&afl->diags, d_xfoil, NULL);
 
-		afl_combine_diag(d1, d2);
+		if (d_afl == NULL) {
+			fprintf(stderr, "ERROR: XFoil polar Re=%.3fM has no "
+			    "matching polar in the AFL file.\n"
+			    "  Open the input AFL file in Airfoil Maker and "
+			    "add the missing Re number first,\n"
+			    "  then re-run polar2afl.\n",
+			    d_xfoil->params.Re / 1000000.0);
+			result = false;
+		}
 	}
+
+	for (polar_diag_t *d_afl = avl_first(&afl->diags); d_afl != NULL;
+	    d_afl = AVL_NEXT(&afl->diags, d_afl)) {
+		const polar_diag_t *d_xfoil =
+		    avl_find(&xfoil->diags, d_afl, NULL);
+
+		if (d_xfoil == NULL) {
+			fprintf(stderr, "ERROR: polar Re=%.3fM in AFL file "
+			    "has no matching XFoil polar,\n"
+			    "  leaving unmodified.\n",
+			    d_afl->params.Re / 1000000.0);
+			result = false;
+			continue;
+		}
+		assert(avl_numnodes(&d_xfoil->polars) != 0);
+
+		afl_combine_diag(d_afl, d_xfoil);
+	}
+
+	return (result);
 }
 
 static void
@@ -777,6 +804,7 @@ main(int argc, char *argv[])
 	afl_t *afl;
 	afl_t *xfoil;
 	int opt;
+	bool result;
 
 	while ((opt = getopt(argc, argv, "hse:")) != -1) {
 		switch (opt) {
@@ -818,11 +846,11 @@ main(int argc, char *argv[])
 		if (!xfoil_polar_parse(xfoil, argv[i]))
 			return (1);
 	}
-	afl_combine(afl, xfoil);
+	result = afl_combine(afl, xfoil);
 	afl_write(afl, argv[2]);
 
 	afl_free(afl);
 	afl_free(xfoil);
 
-	return (0);
+	return (result ? 0 : 1);
 }
