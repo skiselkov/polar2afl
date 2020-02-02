@@ -823,7 +823,7 @@ main(int argc, char *argv[])
 			}
 			break;
 		default:
-			print_usage(stderr, argv[1]);
+			print_usage(stderr, argv[0]);
 			return (1);
 		}
 	}
