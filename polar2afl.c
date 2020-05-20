@@ -192,10 +192,12 @@ static int
 polar_compar(const void *a, const void *b)
 {
 	const polar_t *pa = a, *pb = b;
+	double alpha_a = round(pa->alpha * 10.0) / 10.0;
+	double alpha_b = round(pb->alpha * 10.0) / 10.0;
 
-	if (pa->alpha < pb->alpha)
+	if (alpha_a < alpha_b)
 		return (-1);
-	if (pa->alpha > pb->alpha)
+	if (alpha_a > alpha_b)
 		return (1);
 	return (0);
 }
@@ -462,6 +464,13 @@ afl_free(afl_t *afl)
 	free(afl);
 }
 
+static double
+lerp(double x, double x1, double y1, double x2, double y2)
+{
+	assert(x1 != x2);
+	return (((x - x1) / (x2 - x1)) * (y2 - y1) + y1);
+}
+
 static bool
 xfoil_polar_parse(afl_t *xfoil, const char *filename)
 {
@@ -518,6 +527,31 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 			avl_insert(&diag->polars, polar, where);
 		}
 	}
+	/*
+	 * Pass over the entire diagram and do a linear interpolation
+	 * of any missing pieces.
+	 */
+	for (polar_t *pt = avl_first(&diag->polars), *pt_next = NULL;
+	    pt != NULL; pt = pt_next) {
+		pt_next = AVL_NEXT(&diag->polars, pt);
+		if (pt_next == NULL)
+			break;
+		for (double alpha = pt->alpha + 0.1;
+		    alpha + 0.01 < pt_next->alpha;
+		    alpha = (round(alpha * 10.0) + 1.0) / 10.0) {
+			polar_t *polar = safe_calloc(1, sizeof (*polar));
+
+			polar->alpha = alpha;
+			polar->Cl = lerp(alpha, pt->alpha, pt->Cl,
+			    pt_next->alpha, pt_next->Cl);
+			polar->Cd = lerp(alpha, pt->alpha, pt->Cd,
+			    pt_next->alpha, pt_next->Cd);
+			polar->Cm = lerp(alpha, pt->alpha, pt->Cm,
+			    pt_next->alpha, pt_next->Cm);
+			avl_add(&diag->polars, polar);
+		}
+	}
+
 	if (do_smooth_polars)
 		diag = smooth_diag(diag);
 	if (avl_find(&xfoil->diags, diag, &where) != NULL) {
