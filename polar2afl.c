@@ -423,8 +423,6 @@ afl_write_diag(FILE *fp, const polar_diag_t *diag)
 
 		alpha = round((alpha + step) * 10.0) / 10.0;
 	}
-
-
 }
 
 static bool
