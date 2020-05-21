@@ -13,7 +13,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2019 Saso Kiselkov. All rights reserved.
+ * Copyright 2020 Saso Kiselkov. All rights reserved.
  */
 
 #include <assert.h>
@@ -785,7 +785,7 @@ print_usage(FILE *fp, const char *progname)
 	fprintf(fp, "Usage: %s [-hs] [-e <range>] <input.afl> <output.afl> "
 	    "[polar.txt...]\n"
 	    "\n"
-	    "  Copyright 2019 Saso Kiselkov. All rights reserved.\n"
+	    "  Copyright 2020 Saso Kiselkov. All rights reserved.\n"
 	    "\n"
 	    "  This utility takes an input .afl file produced by X-Plane's\n"
 	    "  Airfoil Maker and a number of polar graphs from XFoil and\n"
