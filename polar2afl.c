@@ -826,7 +826,13 @@ print_usage(FILE *fp, const char *progname)
 	    "     outside of the polar data range, we gradually interpolate\n"
 	    "     between the original .afl curve and our polar data curve.\n"
 	    "     The default is to interpolate the edge fit over 10 degrees\n"
-	    "     of alpha range.\n",
+	    "     of alpha range.\n"
+	    " -i <input.afl>: you can optionally use the -i option to\n"
+	    "     specify the input file out of order. This helps with\n"
+	    "     build script construction.\n"
+	    " -o <output.afl>: you can optionally use the -o option to\n"
+	    "     specify the output file out of order. This helps with\n"
+	    "     build script construction.\n",
 	    progname, progname);
 }
 
@@ -837,8 +843,9 @@ main(int argc, char *argv[])
 	afl_t *xfoil;
 	int opt;
 	bool result;
+	const char *infoil = NULL, *outfoil = NULL;
 
-	while ((opt = getopt(argc, argv, "hse:")) != -1) {
+	while ((opt = getopt(argc, argv, "hse:i:o:")) != -1) {
 		switch (opt) {
 		case 'h':
 			print_usage(stdout, argv[0]);
@@ -854,6 +861,12 @@ main(int argc, char *argv[])
 				return (1);
 			}
 			break;
+		case 'i':
+			infoil = optarg;
+			break;
+		case 'o':
+			outfoil = optarg;
+			break;
 		default:
 			print_usage(stderr, argv[0]);
 			return (1);
@@ -863,26 +876,39 @@ main(int argc, char *argv[])
 	argc -= optind - 1;
 	argv += optind - 1;
 
-	if (argc < 3) {
-		fprintf(stderr, "Missing arguments. Try \"%s -h\" for help.\n",
-		    argv[0]);
-		return (1);
+	if (infoil == NULL) {
+		if (argc < 1)
+			goto missing_args;
+		infoil = argv[1];
+		argv++;
+		argc--;
+	}
+	if (outfoil == NULL) {
+		if (argc < 1)
+			goto missing_args;
+		outfoil = argv[1];
+		argv++;
+		argc--;
 	}
 
-	afl = afl_parse(argv[1]);
+	afl = afl_parse(infoil);
 	if (afl == NULL)
 		return (1);
 
 	xfoil = afl_alloc();
-	for (int i = 3; i < argc; i++) {
+	for (int i = 1; i < argc; i++) {
 		if (!xfoil_polar_parse(xfoil, argv[i]))
 			return (1);
 	}
 	result = afl_combine(afl, xfoil);
-	afl_write(afl, argv[2]);
+	afl_write(afl, outfoil);
 
 	afl_free(afl);
 	afl_free(xfoil);
 
 	return (result ? 0 : 1);
+missing_args:
+	fprintf(stderr, "Missing arguments. Try \"%s -h\" for help.\n",
+	    argv[0]);
+	return (1);
 }
