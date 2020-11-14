@@ -540,6 +540,7 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 		    alpha + 0.01 < pt_next->alpha;
 		    alpha = (round(alpha * 10.0) + 1.0) / 10.0) {
 			polar_t *polar = safe_calloc(1, sizeof (*polar));
+			avl_index_t where;
 
 			polar->alpha = alpha;
 			polar->Cl = lerp(alpha, pt->alpha, pt->Cl,
@@ -548,7 +549,14 @@ xfoil_polar_parse(afl_t *xfoil, const char *filename)
 			    pt_next->alpha, pt_next->Cd);
 			polar->Cm = lerp(alpha, pt->alpha, pt->Cm,
 			    pt_next->alpha, pt_next->Cm);
-			avl_add(&diag->polars, polar);
+			/*
+			 * Duplicates are possible because we round the
+			 * alpha, so deal with them gracefully.
+			 */
+			if (avl_find(&diag->polars, polar, &where) == NULL)
+				avl_insert(&diag->polars, polar, where);
+			else
+				free(polar);
 		}
 	}
 
