@@ -852,6 +852,7 @@ main(int argc, char *argv[])
 	int opt;
 	bool result;
 	const char *infoil = NULL, *outfoil = NULL;
+	const char *progname = argv[0];
 
 	while ((opt = getopt(argc, argv, "hse:i:o:")) != -1) {
 		switch (opt) {
@@ -917,6 +918,6 @@ main(int argc, char *argv[])
 	return (result ? 0 : 1);
 missing_args:
 	fprintf(stderr, "Missing arguments. Try \"%s -h\" for help.\n",
-	    argv[0]);
+	    progname);
 	return (1);
 }
