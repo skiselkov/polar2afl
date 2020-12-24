@@ -365,7 +365,7 @@ errout:
 }
 
 static void
-afl_write_diag(FILE *fp, const polar_diag_t *diag)
+afl_write_diag(FILE *fp, const polar_diag_t *diag, double chord)
 {
 	if (avl_numnodes(&diag->polars) == 0)
 		return;
@@ -373,8 +373,8 @@ afl_write_diag(FILE *fp, const polar_diag_t *diag)
 	fprintf(fp, "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f "
 	    "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f "
 	    "%.5f %.5f %.5f\n",
-	    diag->params.Re / 1000000, diag->params.slope,
-	    diag->params.intercept, diag->params.alpha_min,
+	    round((diag->params.Re * chord) / 10000.0) / 100.0,
+	    diag->params.slope, diag->params.intercept, diag->params.alpha_min,
 	    diag->params.alpha_max, diag->params.lin_range,
 	    diag->params.lift_power, diag->params.Cl_max,
 	    diag->params.stall_drop, diag->params.stall_power,
@@ -428,7 +428,7 @@ afl_write_diag(FILE *fp, const polar_diag_t *diag)
 }
 
 static bool
-afl_write(const afl_t *afl, const char *filename)
+afl_write(const afl_t *afl, const char *filename, double chord)
 {
 	FILE *fp = fopen(filename, "w");
 
@@ -443,7 +443,7 @@ afl_write(const afl_t *afl, const char *filename)
 
 	for (const polar_diag_t *diag = avl_first(&afl->diags);
 	    diag != NULL; diag = AVL_NEXT(&afl->diags, diag)) {
-		afl_write_diag(fp, diag);
+		afl_write_diag(fp, diag, chord);
 	}
 
 	fclose(fp);
@@ -790,8 +790,8 @@ afl_combine(afl_t *afl, const afl_t *xfoil)
 static void
 print_usage(FILE *fp, const char *progname)
 {
-	fprintf(fp, "Usage: %s [-hs] [-e <range>] <input.afl> <output.afl> "
-	    "[polar.txt...]\n"
+	fprintf(fp, "Usage: %s [-hs] [-c <chord>] [-e <range>] <input.afl> "
+	    "<output.afl> [polar.txt...]\n"
 	    "\n"
 	    "  Copyright 2020 Saso Kiselkov. All rights reserved.\n"
 	    "\n"
@@ -810,14 +810,25 @@ print_usage(FILE *fp, const char *progname)
 	    "  polar2afl will NOT splice in any polars for Re numbers that\n"
 	    "  are not already present in the .afl file.\n"
 	    "\n"
+	    "  IMPORTANT CAVEAT:\n"
+	    "  X-Plane doesn't scale Reynolds numbers in airfoil files, so\n"
+	    "  it's going to calculate the exact Reynolds for the wing\n"
+	    "  section and simply look up a matching entry (or interpolate)\n"
+	    "  from the afl file. But XFoil uses unit chords. So, to work\n"
+	    "  around this, use the `-c <length>' parameter. This makes\n"
+	    "  polar2afl multiply the Reynolds in the output AFL file by\n"
+	    "  by this number, effectively pre-scaling the Reynolds numbers\n"
+	    "  to the chord length of your wing.\n"
+	    "\n"
 	    "Example:\n"
 	    "  Take two polars named `NACA2412_Re2.5.txt' and "
 	    "`NACA2412_Re3.5.txt'\n"
 	    "  in the current directory and splice them into an airfoil file\n"
-	    "  named `foo.afl', writing the result to a new file named "
-	    "`bar.afl'.\n"
+	    "  named `foo.afl', writing the result to a new file named\n"
+	    "  `bar.afl' and scaling the Reynolds numbers to a 1.8m wing.\n"
 	    "\n"
-	    "  $ %s foo.afl bar.afl NACA2412_Re2.5.txt NACA2412_Re3.5.txt\n"
+	    "  $ %s -c 1.8 foo.afl bar.afl NACA2412_Re2.5.txt "
+	    "NACA2412_Re3.5.txt\n"
 	    "\n"
 	    "Options:\n"
 	    " -h: Shows this help screen and exits.\n"
@@ -835,6 +846,9 @@ print_usage(FILE *fp, const char *progname)
 	    "     between the original .afl curve and our polar data curve.\n"
 	    "     The default is to interpolate the edge fit over 10 degrees\n"
 	    "     of alpha range.\n"
+	    " -c <chord>: scale the output AFL file's Reynolds numbers by\n"
+	    "     this factor. This can be used to translate from XFoil's\n"
+	    "     unit chord data to X-Plane's scaled chord data.\n"
 	    " -i <input.afl>: you can optionally use the -i option to\n"
 	    "     specify the input file out of order. This helps with\n"
 	    "     build script construction.\n"
@@ -853,8 +867,9 @@ main(int argc, char *argv[])
 	bool result;
 	const char *infoil = NULL, *outfoil = NULL;
 	const char *progname = argv[0];
+	double chord = 1;
 
-	while ((opt = getopt(argc, argv, "hse:i:o:")) != -1) {
+	while ((opt = getopt(argc, argv, "hse:i:o:c:")) != -1) {
 		switch (opt) {
 		case 'h':
 			print_usage(stdout, argv[0]);
@@ -875,6 +890,14 @@ main(int argc, char *argv[])
 			break;
 		case 'o':
 			outfoil = optarg;
+			break;
+		case 'c':
+			chord = atof(optarg);
+			if (chord <= 0) {
+				fprintf(stderr, "Invalid chord length. "
+				    "Must be a positive number.\n");
+				return (1);
+			}
 			break;
 		default:
 			print_usage(stderr, argv[0]);
@@ -910,7 +933,7 @@ main(int argc, char *argv[])
 			return (1);
 	}
 	result = afl_combine(afl, xfoil);
-	afl_write(afl, outfoil);
+	afl_write(afl, outfoil, chord);
 
 	afl_free(afl);
 	afl_free(xfoil);
